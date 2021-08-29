@@ -13,6 +13,7 @@ Arguments:
 
 Options:
     --use-local           Use ONLY local package info instead of querying PyPI.
+    --recursive <pkg>     TODO
     --pypi-server <url>   Use custom PyPi server.
     --proxy <url>         Use Proxy, parameter will be passed to requests
                           library. You can also just set the environments
@@ -95,7 +96,7 @@ def _open(filename=None, mode='r'):
 
 
 def get_all_imports(
-        path, encoding=None, extra_ignore_dirs=None, follow_links=True):
+        path, encoding=None, extra_ignore_dirs=None, follow_links=True, recursive=None):
     imports = set()
     raw_imports = set()
     candidates = []
@@ -144,7 +145,13 @@ def get_all_imports(
         # Cleanup: We only want to first part of the import.
         # Ex: from django.conf --> django.conf. But we only want django
         # as an import.
-        cleaned_name, _, _ = name.partition('.')
+        cleaned_name, _, submodule = name.partition('.')
+        if cleaned_name == recursive:
+            pkg = query_pypi(cleaned_name)
+            remote_raw = open_remote_requirements(pkg, submodule)
+            remote_reqs = parse_requirements(remote_raw)
+            imports.update([req['name'] for req in remote_reqs])
+
         imports.add(cleaned_name)
 
     packages = imports - (set(candidates) & imports)
@@ -178,22 +185,25 @@ def output_requirements(imports):
     generate_requirements_file('-', imports)
 
 
+def query_pypi(item, pypi_server="https://pypi.python.org/pypi/", proxy=None):
+    response = requests.get("{0}{1}/json".format(pypi_server, item), proxies=proxy)
+    if response.status_code == 200:
+        if hasattr(response.content, 'decode'):
+            return json2package(response.content.decode())
+        else:
+            return json2package(response.content)
+    elif response.status_code >= 300:
+        raise HTTPError(status_code=response.status_code,
+                        reason=response.reason)
+
+
 def get_imports_info(
         imports, pypi_server="https://pypi.python.org/pypi/", proxy=None):
     result = []
 
     for item in imports:
         try:
-            response = requests.get(
-                "{0}{1}/json".format(pypi_server, item), proxies=proxy)
-            if response.status_code == 200:
-                if hasattr(response.content, 'decode'):
-                    data = json2package(response.content.decode())
-                else:
-                    data = json2package(response.content)
-            elif response.status_code >= 300:
-                raise HTTPError(status_code=response.status_code,
-                                reason=response.reason)
+            data = query_pypi(item, pypi_server, proxy)
         except HTTPError:
             logging.debug(
                 'Package %s does not exist or network problems', item)
@@ -283,7 +293,44 @@ def join(f):
     return os.path.join(os.path.dirname(__file__), f)
 
 
-def parse_requirements(file_):
+def open_remote_requirements(pkg, submodule):
+    # https://raw.githubusercontent.com/andrewdircks/dash_utils_test/master/dash_utils_test/util1/requirements.txt
+    # https://github.com/andrewdircks/dash_utils_test
+    try:
+        github_url = pkg.homepage
+        pkg_name = pkg.name.replace('-', '_')
+        raw_url = github_url.replace('github', 'raw.githubusercontent')
+        raw_url += f'/master/{pkg_name}/{submodule}/requirements.txt'
+    except:
+        raise Exception('Recursive package must have a github homepage')
+    
+    response = requests.get(raw_url)
+    if response.status_code == 200:
+        return response.text
+    elif response.status_code >= 300:
+        raise HTTPError(status_code=response.status_code,
+                        reason=response.reason)
+
+
+def open_requirements(file_):
+    try:
+        f = open_func(file_, "r")
+    except OSError:
+        try:
+            data = [x.strip() for x in file_.split('\n')]
+        except:
+            logging.error("Failed on file: {}".format(file_))
+            raise
+    else:
+        try:
+            data = [x.strip() for x in f.readlines() if x != "\n"]
+        finally:
+            f.close()
+
+    return [x for x in data if x[0].isalpha()]
+
+
+def parse_requirements(file_, israw=False):
     """Parse a requirements formatted file.
 
     Traverse a string until a delimiter is detected, then split at said
@@ -304,18 +351,7 @@ def parse_requirements(file_):
     # https://www.python.org/dev/peps/pep-0508/#complete-grammar
     delim = ["<", ">", "=", "!", "~"]
 
-    try:
-        f = open_func(file_, "r")
-    except OSError:
-        logging.error("Failed on file: {}".format(file_))
-        raise
-    else:
-        try:
-            data = [x.strip() for x in f.readlines() if x != "\n"]
-        finally:
-            f.close()
-
-    data = [x for x in data if x[0].isalpha()]
+    data = open_requirements(file_)
 
     for x in data:
         # Check for modules w/o a specifier.
@@ -402,11 +438,16 @@ def init(args):
 
     if extra_ignore_dirs:
         extra_ignore_dirs = extra_ignore_dirs.split(',')
+    
+    recursive = None
+    if args.get('--recursive'):
+        recursive = args['--recursive']
 
     candidates = get_all_imports(input_path,
                                  encoding=encoding,
                                  extra_ignore_dirs=extra_ignore_dirs,
-                                 follow_links=follow_links)
+                                 follow_links=follow_links,
+                                 recursive=recursive)
     candidates = get_pkg_names(candidates)
     logging.debug("Found imports: " + ", ".join(candidates))
     pypi_server = "https://pypi.python.org/pypi/"
