@@ -21,6 +21,7 @@ Options:
                           $ export HTTPS_PROXY="https://10.10.1.10:1080"
     --debug               Print debug information.
     --ignore <dirs>...    Ignore extra directories, each separated by a comma.
+    --recurse <module>    Recurse the local module.
     --no-follow-links     Do not follow symbolic links in the project
     --encoding <charset>  Use encoding parameter for file open
     --savepath <file>     Save the list of requirements in the given file
@@ -95,7 +96,7 @@ def _open(filename=None, mode='r'):
 
 
 def get_all_imports(
-        path, encoding=None, extra_ignore_dirs=None, follow_links=True):
+        path, encoding=None, extra_ignore_dirs=None, follow_links=True, recurse=None, fs=None):
     imports = set()
     raw_imports = set()
     candidates = []
@@ -114,6 +115,9 @@ def get_all_imports(
 
         candidates.append(os.path.basename(root))
         files = [fn for fn in files if os.path.splitext(fn)[1] == ".py"]
+
+        if fs is not None:
+            files = [fn for fn in files if os.path.splitext(fn)[0] in fs]
 
         candidates += [os.path.splitext(fn)[0] for fn in files]
         for file_name in files:
@@ -144,8 +148,13 @@ def get_all_imports(
         # Cleanup: We only want to first part of the import.
         # Ex: from django.conf --> django.conf. But we only want django
         # as an import.
-        cleaned_name, _, _ = name.partition('.')
-        imports.add(cleaned_name)
+        cleaned_name, _, submodule = name.partition('.')
+        if cleaned_name == recurse:
+            fs = [submodule]
+            rec_path = os.path.join(path, cleaned_name)
+            [imports.add(imp) for imp in get_all_imports(rec_path, fs=fs)]
+        else:
+            imports.add(cleaned_name)
 
     packages = imports - (set(candidates) & imports)
     logging.debug('Found packages: {0}'.format(packages))
@@ -406,7 +415,8 @@ def init(args):
     candidates = get_all_imports(input_path,
                                  encoding=encoding,
                                  extra_ignore_dirs=extra_ignore_dirs,
-                                 follow_links=follow_links)
+                                 follow_links=follow_links,
+                                 recurse=args.get('--recurse'))
     candidates = get_pkg_names(candidates)
     logging.debug("Found imports: " + ", ".join(candidates))
     pypi_server = "https://pypi.python.org/pypi/"
